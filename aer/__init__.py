@@ -28,17 +28,16 @@ import struct as _struct
 
 VERSION_STR = "0.4"
 
-end_of_header = "#End Of ASCII Header\r\n".encode()
-matched = len(end_of_header)
 TICKS_PER_SEC = 1000000
 TICKS_PER_MSEC = 1000
 
 DEFAULT_BUFSIZ = 5000000
 
-def find_aer_start(file):
+def find_aer_start(file, end_of_header):
     """finds the start of the event sequence for AER2.0 format."""
     offset = 0
     lines = 0
+    matched = len(end_of_header)
     while offset < matched:
         c = file.read(1)
         if len(c) == 0:
@@ -68,11 +67,14 @@ class _AEDecoder:
     def __init__(self):
         self.dec = _BinaryDecoder('>LL')
 
-    def parse(self, file):
+    def parse(self, file, skip_non_dvs):
         data, timestamp = self.dec.parse(file)
         isDVS = ((data >> 31) & 0x01 == 0)
         if isDVS == False:
-            raise RuntimeError("non-DVS event detected")
+            if skip_non_dvs:
+                return None
+            else:
+                raise RuntimeError("non-DVS event detected")
         spec  = ((data >> 10) & 0x01 != 0)
         pol   = ((data >> 11) & 0x01 != 0)
         x     = (data >> 12) & 0x03FF
@@ -84,24 +86,26 @@ DECODER = _AEDecoder()
 class AEFileReader:
     src    = None
 
-    def __init__(self, path, verbose=True):
+    def __init__(self, path, end_of_header, skip_non_dvs, verbose=True):
         self.src     = open(path, 'rb')
+        self.end_of_header = f"{end_of_header}\r\n".encode()
+        self.skip_non_dvs = skip_non_dvs
         self.verbose = verbose
         try:
             header = self.rewind()
             if self.verbose == True:
-                print(f"opened: {path}", flush=True)
+                print(f"opened: {path}")
         except EOFError:
             raise RuntimeError(f"not in the AEData format: {path}")
 
     def rewind(self):
         self.src.seek(0)
-        find_aer_start(self.src)
+        find_aer_start(self.src, self.end_of_header)
 
     def __iter__(self):
         try:
             while True:
-                yield DECODER.parse(self.src)
+                yield DECODER.parse(self.src, self.skip_non_dvs)
         except EOFError:
             pass
 
@@ -144,7 +148,7 @@ def histogram(data, xdim=240, ydim=180, on=True, off=True):
 
 
 class AEData:
-    def __init__(self, path, n=-1, initialsize=None, verbose=False, copy=None):
+    def __init__(self, path, n=-1, initialsize=None, end_of_header="#End Of ASCII Header", skip_non_dvs=False, verbose=False, copy=None):
         """read events from `file` and returns it as an AEData named tuple.
 
         parameters
@@ -153,6 +157,8 @@ class AEData:
         path        -- path to the .aedat file.
         n           -- the number of events to read from the file.
         initialsize -- the initial size of the buffer array.
+        end_of_header -- the string that indicates the end of header.
+        skip_non_dvs -- whether or not to skip non-DVS events.
         verbose     -- enables verbose output while reading.
         copy        -- a dictionary to copy arrays from (if set, other params are ignored)
 
@@ -179,28 +185,29 @@ class AEData:
             size    = initialsize
 
             time     = np.empty(size, dtype=np.int64)
-            special  = np.empty(size, dtype=np.bool)
-            polarity = np.empty(size, dtype=np.bool)
+            special  = np.empty(size, dtype=np.bool_)
+            polarity = np.empty(size, dtype=np.bool_)
             xpos     = np.empty(size, dtype=np.int16)
             ypos     = np.empty(size, dtype=np.int16)
             offset   = 0
-            with AEFileReader(path, verbose) as reader:
+            with AEFileReader(path, end_of_header, skip_non_dvs, verbose) as reader:
                 for evt in reader:
-                    time[offset], special[offset], polarity[offset], \
-                        xpos[offset], ypos[offset] = evt
-                    offset += 1
-                    if (n > 0) and (offset == n):
-                        break
-                    elif offset == size:
-                        # expand
-                        size *= 2
-                        if verbose == True:
-                            print(f"resizing to: {size:>12d}")
-                        time.resize(size)
-                        special.resize(size)
-                        polarity.resize(size)
-                        xpos.resize(size)
-                        ypos.resize(size)
+                    if evt is not None:
+                        time[offset], special[offset], polarity[offset], \
+                            xpos[offset], ypos[offset] = evt
+                        offset += 1
+                        if (n > 0) and (offset == n):
+                            break
+                        elif offset == size:
+                            # expand
+                            size *= 2
+                            if verbose == True:
+                                print(f"resizing to: {size:>12d}")
+                            time.resize(size)
+                            special.resize(size)
+                            polarity.resize(size)
+                            xpos.resize(size)
+                            ypos.resize(size)
             # fit
             size = offset
             if verbose == True:
